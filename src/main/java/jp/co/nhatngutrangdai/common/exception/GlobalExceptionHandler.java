@@ -12,6 +12,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.authentication.BadCredentialsException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
@@ -113,6 +114,30 @@ public class GlobalExceptionHandler {
                 HttpStatus.FORBIDDEN,
                 "FORBIDDEN",
                 "You are not allowed to access this resource",
+                List.of(),
+                request);
+    }
+
+    @ExceptionHandler(ApiException.class)
+    public ResponseEntity<ApiErrorResponse> handleApiException(
+            ApiException exception,
+            HttpServletRequest request) {
+        return errorResponse(
+                exception.getStatus(),
+                exception.getCode(),
+                exception.getMessage(),
+                List.of(),
+                request);
+    }
+
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ResponseEntity<ApiErrorResponse> handleDataConflict(
+            DataIntegrityViolationException exception,
+            HttpServletRequest request) {
+        return errorResponse(
+                HttpStatus.CONFLICT,
+                "CONFLICT",
+                "The request conflicts with existing data",
                 List.of(),
                 request);
     }

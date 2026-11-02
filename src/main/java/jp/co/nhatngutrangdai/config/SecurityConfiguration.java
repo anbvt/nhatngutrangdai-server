@@ -2,6 +2,7 @@ package jp.co.nhatngutrangdai.config;
 
 import java.time.Clock;
 import java.util.Base64;
+import jakarta.servlet.DispatcherType;
 
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
@@ -91,20 +92,24 @@ public class SecurityConfiguration {
                 .authorizeHttpRequests(authorize -> authorize
                         .requestMatchers("/actuator/health", apiDocsPath + "/**", swaggerPath, "/swagger-ui/**")
                         .permitAll()
+                        .dispatcherTypeMatchers(DispatcherType.ERROR)
+                        .permitAll()
                         .requestMatchers("/api/v1/auth/login")
                         .permitAll()
                         .requestMatchers("/api/v1/auth/me")
                         .authenticated()
                         .requestMatchers("/api/v1/admin/**")
                         .hasAnyRole("ADMIN", "SUPER_ADMIN")
-                        .requestMatchers("/api/v1/students/me/**")
+                        .requestMatchers("/api/v1/students/me", "/api/v1/students/me/**")
                         .hasRole("STUDENT")
                         .requestMatchers("/api/v1/students/**")
+                        .hasAnyRole("ADMIN", "SUPER_ADMIN")
+                        .requestMatchers("/api/v1/courses/**", "/api/v1/classrooms/**", "/api/v1/teachers/**")
                         .hasAnyRole("ADMIN", "SUPER_ADMIN")
                         .requestMatchers("/api/v1/**")
                         .denyAll()
                         .anyRequest()
-                        .permitAll())
+                        .denyAll())
                 .oauth2ResourceServer(resourceServer -> resourceServer
                         .jwt(jwt -> jwt.jwtAuthenticationConverter(authenticationConverter))
                         .authenticationEntryPoint(exceptionHandler)

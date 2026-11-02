@@ -11,6 +11,7 @@ import java.util.Base64;
 import java.util.UUID;
 import java.security.SecureRandom;
 import java.time.Instant;
+import java.util.Map;
 
 import jp.co.nhatngutrangdai.auth.entity.Role;
 import jp.co.nhatngutrangdai.auth.entity.RoleCode;
@@ -83,11 +84,11 @@ class SchoolManagementBackendApplicationTests {
 	}
 
 	@Test
-	void unknownRouteUsesStandardNotFoundError() throws Exception {
+	void unknownRouteIsDeniedByDefaultSecurity() throws Exception {
 		HttpResponse<String> response = sendRequest("/missing-route");
 
-		assertEquals(404, response.statusCode());
-		assertTrue(response.body().contains("\"code\":\"NOT_FOUND\""));
+		assertEquals(401, response.statusCode());
+		assertEquals("UNAUTHENTICATED", objectMapper.readTree(response.body()).path("code").asText());
 	}
 
 	@Test
@@ -106,9 +107,13 @@ class SchoolManagementBackendApplicationTests {
 		Long appliedAuthMigration = jdbcTemplate.queryForObject(
 				"SELECT COUNT(*) FROM \"flyway_schema_history\" WHERE \"version\" = '2'",
 				Long.class);
+		Long appliedCoreMigration = jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM \"flyway_schema_history\" WHERE \"version\" = '3'",
+				Long.class);
 
 		assertEquals(1L, appliedFoundationMigration);
 		assertEquals(1L, appliedAuthMigration);
+		assertEquals(1L, appliedCoreMigration);
 	}
 
 	@Test
@@ -206,6 +211,17 @@ class SchoolManagementBackendApplicationTests {
 	}
 
 	@Test
+	void adminRoleCanAccessCoreReadEndpoints() throws Exception {
+		String token = createUserAndLogin(
+				UUID.randomUUID() + "@example.test",
+				UUID.randomUUID().toString(),
+				RoleCode.ADMIN);
+
+		assertEquals(200, sendRequest("/api/v1/courses", token).statusCode());
+		assertEquals(200, sendRequest("/api/v1/students", token).statusCode());
+	}
+
+	@Test
 	void unconfiguredApiRoutesRemainDenied() throws Exception {
 		HttpResponse<String> response = sendRequest("/api/v1/unconfigured-resource", bootstrapToken());
 
@@ -232,6 +248,262 @@ class SchoolManagementBackendApplicationTests {
 	}
 
 	@Test
+	void adminCanCreateAndFilterCoursesWithPagination() throws Exception {
+		String token = bootstrapToken();
+		HttpResponse<String> created = sendJson(
+				"/api/v1/courses",
+				token,
+				"POST",
+				Map.of(
+						"code", "PH3-" + UUID.randomUUID(),
+						"name", "Japanese N5 course",
+						"duration", "12 weeks",
+						"tuitionAmount", 1200.00,
+						"currency", "jpy",
+						"status", "ACTIVE"));
+
+		assertEquals(201, created.statusCode());
+		var course = objectMapper.readTree(created.body());
+		assertEquals("JPY", course.path("currency").asText());
+		assertEquals("12 weeks", course.path("duration").asText());
+
+		String code = course.path("code").asText();
+		HttpResponse<String> list = sendRequest(
+				"/api/v1/courses?q=" + code + "&status=ACTIVE&page=0&size=1&sort=code,asc",
+				token);
+		var page = objectMapper.readTree(list.body());
+
+		assertEquals(200, list.statusCode());
+		assertEquals(1, page.path("content").size());
+		assertEquals(code, page.path("content").get(0).path("code").asText());
+		assertEquals(1, page.path("size").asInt());
+	}
+
+	@Test
+	void invalidSortFieldReturnsBadRequest() throws Exception {
+		HttpResponse<String> response = sendRequest("/api/v1/courses?sort=passwordHash,asc", bootstrapToken());
+
+		assertEquals(400, response.statusCode());
+		assertEquals("INVALID_REQUEST", objectMapper.readTree(response.body()).path("code").asText());
+	}
+
+	@Test
+	void coursePatchDistinguishesNullFromOmittedFields() throws Exception {
+		String token = bootstrapToken();
+		HttpResponse<String> created = sendJson(
+				"/api/v1/courses",
+				token,
+				"POST",
+				Map.of("code", "P-" + UUID.randomUUID(), "name", "Before", "status", "ACTIVE"));
+		assertEquals(201, created.statusCode(), created.body());
+		String id = objectMapper.readTree(created.body()).path("id").asText();
+		assertTrue(!id.isBlank(), created.body());
+
+		HttpResponse<String> patched = sendJson(
+				"/api/v1/courses/" + id,
+				token,
+				"PATCH",
+				Map.of("description", ""));
+		assertEquals(200, patched.statusCode());
+		assertEquals("Before", objectMapper.readTree(patched.body()).path("name").asText());
+		assertEquals("", objectMapper.readTree(patched.body()).path("description").asText());
+
+		HttpResponse<String> cleared = sendJson(
+				"/api/v1/courses/" + id,
+				token,
+				"PATCH",
+				"{\"description\":null}");
+		assertEquals(200, cleared.statusCode());
+		assertTrue(objectMapper.readTree(cleared.body()).path("description").isNull());
+	}
+
+	@Test
+	void studentCanOnlyReadAndUpdateTheirLinkedProfile() throws Exception {
+		String adminToken = bootstrapToken();
+		String firstEmail = UUID.randomUUID() + "@example.test";
+		String secondEmail = UUID.randomUUID() + "@example.test";
+		String firstPassword = UUID.randomUUID().toString();
+		String secondPassword = UUID.randomUUID().toString();
+		UserAccount firstUser = createUser(firstEmail, firstPassword, RoleCode.STUDENT);
+		UserAccount secondUser = createUser(secondEmail, secondPassword, RoleCode.STUDENT);
+		String firstStudentCode = "STU-" + UUID.randomUUID();
+		String secondStudentCode = "STU-" + UUID.randomUUID();
+		HttpResponse<String> firstCreated = createStudent(adminToken, firstStudentCode, firstUser.getId());
+		HttpResponse<String> secondCreated = createStudent(adminToken, secondStudentCode, secondUser.getId());
+		assertEquals(201, firstCreated.statusCode());
+		assertEquals(201, secondCreated.statusCode());
+
+		String firstToken = loginToken(firstEmail, firstPassword);
+		String secondToken = loginToken(secondEmail, secondPassword);
+		HttpResponse<String> firstProfile = sendRequest("/api/v1/students/me", firstToken);
+		HttpResponse<String> secondProfile = sendRequest("/api/v1/students/me", secondToken);
+		String firstStudentId = objectMapper.readTree(firstCreated.body()).path("id").asText();
+		String secondStudentId = objectMapper.readTree(secondCreated.body()).path("id").asText();
+
+		assertEquals(200, firstProfile.statusCode());
+		assertEquals(200, secondProfile.statusCode());
+		assertEquals(firstStudentId, objectMapper.readTree(firstProfile.body()).path("id").asText());
+		assertEquals(secondStudentId, objectMapper.readTree(secondProfile.body()).path("id").asText());
+
+		HttpResponse<String> updated = sendJson(
+				"/api/v1/students/me",
+				firstToken,
+				"PATCH",
+				"{\"phone\":\"12345\",\"address\":null}");
+		var updatedProfile = objectMapper.readTree(updated.body());
+
+		assertEquals(200, updated.statusCode());
+		assertEquals("12345", updatedProfile.path("phone").asText());
+		assertTrue(updatedProfile.path("address").isNull());
+	}
+
+	@Test
+	void adminCanPatchAllCoreResourcesAndFilterTheirLists() throws Exception {
+		String token = bootstrapToken();
+		String courseCode = "F-" + UUID.randomUUID();
+		HttpResponse<String> course = sendJson(
+				"/api/v1/courses",
+				token,
+				"POST",
+				Map.of("code", courseCode, "name", "Before course", "status", "ACTIVE"));
+		String courseId = objectMapper.readTree(course.body()).path("id").asText();
+		String classroomCode = "R-" + UUID.randomUUID();
+		HttpResponse<String> classroom = sendJson(
+				"/api/v1/classrooms",
+				token,
+				"POST",
+				Map.of(
+						"courseId", courseId,
+						"code", classroomCode,
+						"name", "Before classroom",
+						"capacity", 10,
+						"status", "ACTIVE"));
+		String teacherName = "Teacher-" + UUID.randomUUID();
+		HttpResponse<String> teacher = sendJson(
+				"/api/v1/teachers",
+				token,
+				"POST",
+				Map.of("fullName", teacherName, "status", "ACTIVE"));
+		String studentCode = "S-" + UUID.randomUUID();
+		HttpResponse<String> student = createStudent(token, studentCode, null);
+
+		assertEquals(200, sendJson(
+				"/api/v1/courses/" + courseId,
+				token,
+				"PATCH",
+				Map.of("name", "Updated course")).statusCode());
+		assertEquals(200, sendJson(
+				"/api/v1/classrooms/" + objectMapper.readTree(classroom.body()).path("id").asText(),
+				token,
+				"PATCH",
+				Map.of("capacity", 12)).statusCode());
+		assertEquals(200, sendJson(
+				"/api/v1/teachers/" + objectMapper.readTree(teacher.body()).path("id").asText(),
+				token,
+				"PATCH",
+				Map.of("status", "INACTIVE")).statusCode());
+		assertEquals(200, sendJson(
+				"/api/v1/students/" + objectMapper.readTree(student.body()).path("id").asText(),
+				token,
+				"PATCH",
+				Map.of("fullName", "Updated student")).statusCode());
+
+		assertEquals(1, objectMapper.readTree(sendRequest(
+				"/api/v1/courses?q=" + courseCode + "&status=ACTIVE", token).body()).path("content").size());
+		assertEquals(1, objectMapper.readTree(sendRequest(
+				"/api/v1/classrooms?q=" + classroomCode + "&courseId=" + courseId, token).body()).path("content").size());
+		assertEquals(1, objectMapper.readTree(sendRequest(
+				"/api/v1/teachers?q=" + teacherName, token).body()).path("content").size());
+		assertEquals(1, objectMapper.readTree(sendRequest(
+				"/api/v1/students?q=" + studentCode + "&status=ACTIVE", token).body()).path("content").size());
+	}
+
+	@Test
+	void studentCannotAccessAdminCoreDataEndpoints() throws Exception {
+		String token = createUserAndLogin(
+				UUID.randomUUID() + "@example.test",
+				UUID.randomUUID().toString(),
+				RoleCode.STUDENT);
+
+		assertEquals(403, sendRequest("/api/v1/courses", token).statusCode());
+		assertEquals(403, sendRequest("/api/v1/classrooms", token).statusCode());
+		assertEquals(403, sendRequest("/api/v1/teachers", token).statusCode());
+	}
+
+	@Test
+	void classroomRejectsInvalidDateRange() throws Exception {
+		String token = bootstrapToken();
+		HttpResponse<String> course = sendJson(
+				"/api/v1/courses",
+				token,
+				"POST",
+				Map.of("code", "C-" + UUID.randomUUID(), "name", "Classroom course", "status", "ACTIVE"));
+		String courseId = objectMapper.readTree(course.body()).path("id").asText();
+		HttpResponse<String> classroom = sendJson(
+				"/api/v1/classrooms",
+				token,
+				"POST",
+				Map.of(
+						"courseId", courseId,
+						"code", "R-" + UUID.randomUUID(),
+						"name", "Invalid date classroom",
+						"capacity", 10,
+						"startDate", "2026-03-02",
+						"endDate", "2026-03-01",
+						"status", "ACTIVE"));
+
+		assertEquals(400, classroom.statusCode());
+	}
+
+	@Test
+	void coreCrudEndpointsReturnDtosAndRespectAdminAuthorization() throws Exception {
+		String token = bootstrapToken();
+		HttpResponse<String> course = sendJson(
+				"/api/v1/courses",
+				token,
+				"POST",
+				Map.of("code", "C-" + UUID.randomUUID(), "name", "Core course", "status", "ACTIVE"));
+		assertEquals(201, course.statusCode(), course.body());
+		String courseId = objectMapper.readTree(course.body()).path("id").asText();
+		HttpResponse<String> classroom = sendJson(
+				"/api/v1/classrooms",
+				token,
+				"POST",
+				Map.of(
+						"courseId", courseId,
+						"code", "R-" + UUID.randomUUID(),
+						"name", "Core classroom",
+						"capacity", 12,
+						"status", "ACTIVE"));
+		HttpResponse<String> teacher = sendJson(
+				"/api/v1/teachers",
+				token,
+				"POST",
+				Map.of("fullName", "Teacher " + UUID.randomUUID(), "status", "ACTIVE"));
+		HttpResponse<String> student = createStudent(token, "STU-" + UUID.randomUUID(), null);
+
+		assertEquals(201, classroom.statusCode(), classroom.body());
+		assertEquals(201, teacher.statusCode(), teacher.body());
+		assertEquals(201, student.statusCode(), student.body());
+		assertTrue(!objectMapper.readTree(student.body()).has("passwordHash"));
+		assertEquals(200, sendRequest("/api/v1/classrooms/" + objectMapper.readTree(classroom.body()).path("id").asText(), token).statusCode());
+		assertEquals(200, sendRequest("/api/v1/teachers/" + objectMapper.readTree(teacher.body()).path("id").asText(), token).statusCode());
+		assertEquals(200, sendRequest("/api/v1/students/" + objectMapper.readTree(student.body()).path("id").asText(), token).statusCode());
+	}
+
+	@Test
+	void duplicateStudentCodeConflictsAndStudentCannotListCoreData() throws Exception {
+		String token = bootstrapToken();
+		String studentCode = "DUP-" + UUID.randomUUID();
+		HttpResponse<String> first = createStudent(token, studentCode, null);
+		HttpResponse<String> duplicate = createStudent(token, studentCode, null);
+
+		assertEquals(201, first.statusCode());
+		assertEquals(409, duplicate.statusCode());
+		assertEquals("CONFLICT", objectMapper.readTree(duplicate.body()).path("code").asText());
+	}
+
+	@Test
 	void disabledAccountCannotReusePreviouslyIssuedToken() throws Exception {
 		String email = UUID.randomUUID() + "@example.test";
 		String token = createUserAndLogin(email, UUID.randomUUID().toString(), RoleCode.STUDENT);
@@ -249,13 +521,43 @@ class SchoolManagementBackendApplicationTests {
 	}
 
 	private HttpResponse<String> sendRequest(String path, String token) throws Exception {
+		return sendJson(path, token, "GET", (String) null);
+	}
+
+	private HttpResponse<String> sendJson(String path, String token, String method, Object body) throws Exception {
+		String requestBody = body == null ? "" : body instanceof String text
+				? text
+				: objectMapper.writeValueAsString(body);
 		HttpRequest.Builder request = HttpRequest.newBuilder()
 				.uri(URI.create("http://localhost:" + port + path))
-				.GET();
+				.header("Content-Type", "application/json");
 		if (token != null) {
 			request.header("Authorization", "Bearer " + token);
 		}
+		switch (method) {
+			case "GET" -> request.GET();
+			case "POST" -> request.POST(HttpRequest.BodyPublishers.ofString(requestBody));
+			case "PATCH" -> request.method("PATCH", HttpRequest.BodyPublishers.ofString(requestBody));
+			default -> throw new IllegalArgumentException("Unsupported test HTTP method: " + method);
+		}
 		return HttpClient.newHttpClient().send(request.build(), HttpResponse.BodyHandlers.ofString());
+	}
+
+	private HttpResponse<String> createStudent(String token, String code, UUID userId) throws Exception {
+		Map<String, Object> request = new java.util.HashMap<>();
+		request.put("studentCode", code);
+		request.put("fullName", "Student " + code);
+		request.put("status", "ACTIVE");
+		if (userId != null) {
+			request.put("userId", userId);
+		}
+		return sendJson("/api/v1/students", token, "POST", request);
+	}
+
+	private String loginToken(String email, String password) throws Exception {
+		HttpResponse<String> response = postLogin(email, password);
+		assertEquals(200, response.statusCode());
+		return objectMapper.readTree(response.body()).path("accessToken").asText();
 	}
 
 	private HttpResponse<String> postLogin(String email, String password) throws Exception {
@@ -269,12 +571,16 @@ class SchoolManagementBackendApplicationTests {
 	}
 
 	private String createUserAndLogin(String email, String password, RoleCode roleCode) throws Exception {
-		Role role = roleRepository.findById(roleCode).orElseThrow();
-		UserAccount user = userAccountRepository.save(
-				UserAccount.active(email, passwordEncoder.encode(password), java.util.Set.of(role), java.time.Instant.now()));
+		UserAccount user = createUser(email, password, roleCode);
 		HttpResponse<String> response = postLogin(user.getEmail(), password);
 		assertEquals(200, response.statusCode());
 		return objectMapper.readTree(response.body()).path("accessToken").asText();
+	}
+
+	private UserAccount createUser(String email, String password, RoleCode roleCode) {
+		Role role = roleRepository.findById(roleCode).orElseThrow();
+		return userAccountRepository.save(
+				UserAccount.active(email, passwordEncoder.encode(password), java.util.Set.of(role), java.time.Instant.now()));
 	}
 
 	private String bootstrapToken() throws Exception {

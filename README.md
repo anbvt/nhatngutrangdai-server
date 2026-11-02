@@ -47,5 +47,13 @@ Flyway applies versioned migrations on startup. Hibernate schema generation is s
 - `/api-docs` — generated OpenAPI document.
 - `POST /api/v1/auth/login` — authenticate with email and password; returns a 15-minute JWT access token.
 - `GET /api/v1/auth/me` — return the authenticated account and roles; requires `Authorization: Bearer <access-token>`.
+- Admin/Super Admin CRUD: `GET/POST /api/v1/students`, `GET/PATCH /api/v1/students/{id}`, `GET/POST /api/v1/courses`, `GET/PATCH /api/v1/courses/{id}`, `GET/POST /api/v1/classrooms`, `GET/PATCH /api/v1/classrooms/{id}`, `GET/POST /api/v1/teachers`, and `GET/PATCH /api/v1/teachers/{id}`.
+- Students can access only their linked profile through `GET/PATCH /api/v1/students/me`; self-service edits are limited to phone and address.
 
-Refresh tokens, logout, public Student registration, password reset, and account-management APIs are not implemented. No domain endpoints are available yet. Future list endpoints should use zero-based `page`, default `size` 20, maximum `size` 100, and endpoint-specific sort allowlists.
+List endpoints accept zero-based `page`, `size` (default 20, maximum 100), `sort` (resource-specific allowlist), optional `q`, and optional `status`. Classroom lists also accept `courseId`. POST creates return `201`; validation failures return the standard `400` response; duplicate student codes and account links return `409`; missing records return `404`.
+
+Student codes are required and unique. Student email is optional and non-unique. Student account links are nullable and one-to-one; only active accounts with the `STUDENT` role can be linked, by an admin. Course duration is an optional display label. Course tuition amount/currency are optional and have no inferred currency default. Status values for core records are `ACTIVE` and `INACTIVE`. Classroom capacity must be positive; dates are optional, but `endDate` cannot precede `startDate`.
+
+PATCH semantics: omitted properties are unchanged; explicit `null` clears optional fields. Required fields reject `null` or blank values. A Student may update only their linked profile's phone/address; user ID and other fields cannot be supplied through that endpoint.
+
+Refresh tokens, logout, public Student registration, password reset, and account-management APIs are not implemented. Enrollment, finance, schedule, attendance, exams, materials, notifications, and dashboards remain for later phases.
