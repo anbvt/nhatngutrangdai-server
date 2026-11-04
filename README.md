@@ -49,6 +49,8 @@ Flyway applies versioned migrations on startup. Hibernate schema generation is s
 - `GET /api/v1/auth/me` — return the authenticated account and roles; requires `Authorization: Bearer <access-token>`.
 - Admin/Super Admin CRUD: `GET/POST /api/v1/students`, `GET/PATCH /api/v1/students/{id}`, `GET/POST /api/v1/courses`, `GET/PATCH /api/v1/courses/{id}`, `GET/POST /api/v1/classrooms`, `GET/PATCH /api/v1/classrooms/{id}`, `GET/POST /api/v1/teachers`, and `GET/PATCH /api/v1/teachers/{id}`.
 - Students can access only their linked profile through `GET/PATCH /api/v1/students/me`; self-service edits are limited to phone and address.
+- Public applicants can submit `POST /api/v1/public/enrollment-applications` with required `fullName`, `email`, `phone`, and `courseId`; optional fields are `dateOfBirth`, `address`, and `nationality`. The response contains a one-time random reference and `PENDING` status, but no personal details.
+- Admin/Super Admin can list/filter `GET /api/v1/enrollments?status=&courseId=` and view `GET /api/v1/enrollments/{id}` including status history. Pending applications are deduplicated by normalized email and course. Public reference lookup, status transitions, class assignment, and conversion/linking to a Student account are not implemented pending business-rule decisions.
 
 List endpoints accept zero-based `page`, `size` (default 20, maximum 100), `sort` (resource-specific allowlist), optional `q`, and optional `status`. Classroom lists also accept `courseId`. POST creates return `201`; validation failures return the standard `400` response; duplicate student codes and account links return `409`; missing records return `404`.
 

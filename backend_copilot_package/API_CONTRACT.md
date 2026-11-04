@@ -51,3 +51,9 @@ Không có public list endpoint và không làm lộ PII.
 
 ## Contract-first
 Với mỗi module: xác định use case và quyền → DTO → validation/error codes → pagination/filter → API tests → persistence/service/controller. Duy trì OpenAPI hoặc tài liệu tương đương. Ưu tiên tương thích với API client hiện có.
+
+## Phase 4 implementation
+- `POST /api/v1/public/enrollment-applications`: requires `fullName`, `email`, `phone`, and `courseId`; `dateOfBirth`, `address`, and `nationality` are optional. Creates a `PENDING` application and returns a random one-time reference without personal data.
+- Admin/Super Admin: `GET /api/v1/enrollments` supports pagination and `status`/`courseId` filters; `GET /api/v1/enrollments/{id}` includes status history.
+- Duplicate pending applications for the same normalized email and course return `409 CONFLICT`.
+- Public lookup, status transitions, class assignment, and Student/account conversion are deferred; see `docs/OPEN_QUESTIONS.md`.

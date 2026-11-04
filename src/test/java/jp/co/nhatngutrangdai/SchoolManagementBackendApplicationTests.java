@@ -110,10 +110,14 @@ class SchoolManagementBackendApplicationTests {
 		Long appliedCoreMigration = jdbcTemplate.queryForObject(
 				"SELECT COUNT(*) FROM \"flyway_schema_history\" WHERE \"version\" = '3'",
 				Long.class);
+		Long appliedEnrollmentMigration = jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM \"flyway_schema_history\" WHERE \"version\" = '4'",
+				Long.class);
 
 		assertEquals(1L, appliedFoundationMigration);
 		assertEquals(1L, appliedAuthMigration);
 		assertEquals(1L, appliedCoreMigration);
+		assertEquals(1L, appliedEnrollmentMigration);
 	}
 
 	@Test
@@ -504,6 +508,90 @@ class SchoolManagementBackendApplicationTests {
 	}
 
 	@Test
+	void publicCanSubmitPendingApplicationAndOnlyAdminCanReviewIt() throws Exception {
+		String adminToken = bootstrapToken();
+		String courseId = createCourse(adminToken);
+		Map<String, Object> application = Map.of(
+				"fullName", "Applicant " + UUID.randomUUID(),
+				"email", UUID.randomUUID() + "@example.test",
+				"phone", "0900000000",
+				"courseId", courseId);
+
+		HttpResponse<String> submission = sendJson(
+				"/api/v1/public/enrollment-applications", null, "POST", application);
+
+		assertEquals(201, submission.statusCode(), submission.body());
+		var receipt = objectMapper.readTree(submission.body());
+		assertEquals("PENDING", receipt.path("status").asText());
+		assertEquals(43, receipt.path("reference").asText().length());
+		assertTrue(!receipt.has("applicantEmail"));
+
+		HttpResponse<String> unauthorizedList = sendRequest("/api/v1/enrollments");
+		assertEquals(401, unauthorizedList.statusCode());
+
+		HttpResponse<String> adminList = sendRequest("/api/v1/enrollments?status=PENDING&courseId=" + courseId, adminToken);
+		assertEquals(200, adminList.statusCode(), adminList.body());
+		var list = objectMapper.readTree(adminList.body()).path("content");
+		assertEquals(1, list.size());
+		String enrollmentId = list.get(0).path("id").asText();
+		HttpResponse<String> detail = sendRequest("/api/v1/enrollments/" + enrollmentId, adminToken);
+		assertEquals(200, detail.statusCode(), detail.body());
+		var detailBody = objectMapper.readTree(detail.body());
+		assertEquals("PENDING", detailBody.path("status").asText());
+		assertEquals(1, detailBody.path("statusHistory").size());
+		assertTrue(detailBody.path("statusHistory").get(0).path("oldStatus").isNull());
+		assertEquals("PENDING", detailBody.path("statusHistory").get(0).path("newStatus").asText());
+
+		String studentToken = createUserAndLogin(
+				UUID.randomUUID() + "@example.test",
+				UUID.randomUUID().toString(),
+				RoleCode.STUDENT);
+		assertEquals(403, sendRequest("/api/v1/enrollments", studentToken).statusCode());
+	}
+
+	@Test
+	void pendingApplicationsAreDeduplicatedByNormalizedEmailAndCourse() throws Exception {
+		String courseId = createCourse(bootstrapToken());
+		String email = UUID.randomUUID() + "@example.test";
+		Map<String, Object> application = Map.of(
+				"fullName", "Applicant",
+				"email", email,
+				"phone", "0900000000",
+				"courseId", courseId);
+		HttpResponse<String> first = sendJson(
+				"/api/v1/public/enrollment-applications", null, "POST", application);
+		Map<String, Object> duplicate = Map.of(
+				"fullName", "Applicant Duplicate",
+				"email", email.toUpperCase(java.util.Locale.ROOT),
+				"phone", "0900000001",
+				"courseId", courseId);
+		HttpResponse<String> second = sendJson(
+				"/api/v1/public/enrollment-applications", null, "POST", duplicate);
+
+		assertEquals(201, first.statusCode(), first.body());
+		assertEquals(409, second.statusCode(), second.body());
+	}
+
+	@Test
+	void publicEnrollmentApplicationValidatesRequiredFieldsAndCourse() throws Exception {
+		HttpResponse<String> invalid = sendJson(
+				"/api/v1/public/enrollment-applications",
+				null,
+				"POST",
+				Map.of("fullName", "Applicant"));
+		assertEquals(400, invalid.statusCode());
+
+		Map<String, Object> missingCourse = Map.of(
+				"fullName", "Applicant",
+				"email", UUID.randomUUID() + "@example.test",
+				"phone", "0900000000",
+				"courseId", UUID.randomUUID());
+		HttpResponse<String> noCourse = sendJson(
+				"/api/v1/public/enrollment-applications", null, "POST", missingCourse);
+		assertEquals(404, noCourse.statusCode());
+	}
+
+	@Test
 	void disabledAccountCannotReusePreviouslyIssuedToken() throws Exception {
 		String email = UUID.randomUUID() + "@example.test";
 		String token = createUserAndLogin(email, UUID.randomUUID().toString(), RoleCode.STUDENT);
@@ -552,6 +640,16 @@ class SchoolManagementBackendApplicationTests {
 			request.put("userId", userId);
 		}
 		return sendJson("/api/v1/students", token, "POST", request);
+	}
+
+	private String createCourse(String token) throws Exception {
+		HttpResponse<String> course = sendJson(
+				"/api/v1/courses",
+				token,
+				"POST",
+				Map.of("code", "ENR-" + UUID.randomUUID(), "name", "Enrollment course", "status", "ACTIVE"));
+		assertEquals(201, course.statusCode(), course.body());
+		return objectMapper.readTree(course.body()).path("id").asText();
 	}
 
 	private String loginToken(String email, String password) throws Exception {
