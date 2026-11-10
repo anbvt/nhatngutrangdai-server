@@ -110,6 +110,11 @@ public class SecurityConfiguration {
                         .hasAnyRole("ADMIN", "SUPER_ADMIN")
                         .requestMatchers("/api/v1/enrollments/**")
                         .hasAnyRole("ADMIN", "SUPER_ADMIN")
+                        .requestMatchers(
+                                "/api/v1/invoices/**",
+                                "/api/v1/payments/**",
+                                "/api/v1/transactions/**")
+                        .hasAnyRole("ADMIN", "SUPER_ADMIN")
                         .requestMatchers("/api/v1/**")
                         .denyAll()
                         .anyRequest()

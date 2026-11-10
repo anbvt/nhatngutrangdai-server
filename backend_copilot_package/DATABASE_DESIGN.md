@@ -24,11 +24,12 @@ PostgreSQL; UUID được khuyến nghị cho ID public nếu phù hợp codebas
 Cần xác nhận form fields và quy trình chuyển guest application thành student/account.
 
 ## Finance
-- `invoices`: id, student_id, enrollment_id nullable, invoice_number, issue_date, due_date, total_amount, currency, status.
-- `invoice_items`: invoice_id, description, quantity, unit_amount, line_total.
-- `payments`: id, student_id, invoice_id nullable theo allocation rule, amount, currency, paid_at, method, reference, recorded_by, note, status.
-- `payment_allocations`: payment_id, invoice_id, allocated_amount (nếu một payment có thể phân bổ nhiều invoice).
-- `refunds`: payment_id, amount, reason, status, requested_at, processed_at, processed_by.
+- Phase 5 implementation: `invoices` has required `student_id`, optional matching `enrollment_id`, generated unique `invoice_number`, `issue_date`, optional `due_date`, `currency`, and positive `total_amount`.
+- `invoice_items`: invoice_id, line_number, description, positive integer quantity, non-negative `unit_amount`, and `line_total` enforced as quantity × unit amount. At least one line is required; discounts/tax are not applied.
+- `payments`: invoice_id, positive amount, invoice currency, method (`CASH`, `BANK_TRANSFER`, `CARD`, `OTHER`), server-recorded `paid_at`, optional external reference/note, and `recorded_by`. One payment is allocated to exactly one invoice; partial payment is supported and overpayment is rejected.
+- `financial_transactions`: one separate immutable `PAYMENT` ledger entry per payment, with amount/currency/time/actor/reference. This is not a payment status and is not a payment gateway transaction.
+- `financial_audit_events`: actor, action, resource type/id, and timestamp for invoice issuance and payment recording.
+- Invoice status is derived from total payments (`ISSUED`, `PARTIALLY_PAID`, `PAID`); refunds, voiding, overdue status, and gateway integrations are deferred.
 
 ## Schedule and academic
 - `class_sessions`: classroom_id, starts_at, ends_at, location, status.
@@ -47,4 +48,4 @@ Cần xác nhận form fields và quy trình chuyển guest application thành s
 Không ghi password, token hoặc toàn bộ dữ liệu cá nhân trong metadata.
 
 ## Decisions to confirm
-Quan hệ user-student; uniqueness email/student_code; nhiều enrollment/lớp; thay course có tạo enrollment mới không; nhiều teacher/lớp; một invoice nhiều payments; một payment nhiều invoices; quy tắc refund; lưu file ở đâu; retention dữ liệu.
+Quan hệ user-student; uniqueness email/student_code; nhiều enrollment/lớp; thay course có tạo enrollment mới không; nhiều teacher/lớp; quy tắc refund; xử lý invoice quá hạn/hủy; lưu file ở đâu; retention dữ liệu.

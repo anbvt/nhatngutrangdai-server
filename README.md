@@ -51,6 +51,7 @@ Flyway applies versioned migrations on startup. Hibernate schema generation is s
 - Students can access only their linked profile through `GET/PATCH /api/v1/students/me`; self-service edits are limited to phone and address.
 - Public applicants can submit `POST /api/v1/public/enrollment-applications` with required `fullName`, `email`, `phone`, and `courseId`; optional fields are `dateOfBirth`, `address`, and `nationality`. The response contains a one-time random reference and `PENDING` status, but no personal details.
 - Admin/Super Admin can list/filter `GET /api/v1/enrollments?status=&courseId=` and view `GET /api/v1/enrollments/{id}` including status history. Pending applications are deduplicated by normalized email and course. Public reference lookup, status transitions, class assignment, and conversion/linking to a Student account are not implemented pending business-rule decisions.
+- Admin/Super Admin finance APIs: `POST /api/v1/invoices` (issue invoice with items), `GET /api/v1/invoices`, `GET /api/v1/invoices/{id}`, `POST /api/v1/payments`, `GET /api/v1/payments`, and read-only `GET /api/v1/transactions`. Student self-service: `GET /api/v1/students/me/invoices`, `GET /api/v1/students/me/invoices/{id}`, and `GET /api/v1/students/me/payments`.
 
 List endpoints accept zero-based `page`, `size` (default 20, maximum 100), `sort` (resource-specific allowlist), optional `q`, and optional `status`. Classroom lists also accept `courseId`. POST creates return `201`; validation failures return the standard `400` response; duplicate student codes and account links return `409`; missing records return `404`.
 
@@ -58,4 +59,6 @@ Student codes are required and unique. Student email is optional and non-unique.
 
 PATCH semantics: omitted properties are unchanged; explicit `null` clears optional fields. Required fields reject `null` or blank values. A Student may update only their linked profile's phone/address; user ID and other fields cannot be supplied through that endpoint.
 
-Refresh tokens, logout, public Student registration, password reset, and account-management APIs are not implemented. Enrollment, finance, schedule, attendance, exams, materials, notifications, and dashboards remain for later phases.
+Invoices are issued immediately with generated invoice numbers, required three-letter currency and line items; tax/discount are not applied. Manual payments may be partial but cannot exceed invoice balance. Every payment creates a separate immutable ledger transaction and finance audit event. Refunds, invoice editing/voiding, overdue status, and payment gateway integration are not implemented.
+
+Refresh tokens, logout, public Student registration, password reset, and account-management APIs are not implemented. Schedule, attendance, exams, materials, notifications, and dashboards remain for later phases.

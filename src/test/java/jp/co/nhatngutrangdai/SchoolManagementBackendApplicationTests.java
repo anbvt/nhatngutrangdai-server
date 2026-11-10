@@ -8,6 +8,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.Base64;
+import java.util.List;
 import java.util.UUID;
 import java.security.SecureRandom;
 import java.time.Instant;
@@ -113,11 +114,15 @@ class SchoolManagementBackendApplicationTests {
 		Long appliedEnrollmentMigration = jdbcTemplate.queryForObject(
 				"SELECT COUNT(*) FROM \"flyway_schema_history\" WHERE \"version\" = '4'",
 				Long.class);
+		Long appliedFinanceMigration = jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM \"flyway_schema_history\" WHERE \"version\" = '5'",
+				Long.class);
 
 		assertEquals(1L, appliedFoundationMigration);
 		assertEquals(1L, appliedAuthMigration);
 		assertEquals(1L, appliedCoreMigration);
 		assertEquals(1L, appliedEnrollmentMigration);
+		assertEquals(1L, appliedFinanceMigration);
 	}
 
 	@Test
@@ -592,6 +597,110 @@ class SchoolManagementBackendApplicationTests {
 	}
 
 	@Test
+	void adminCanIssueInvoiceAndRecordPartialPaymentsWithSeparateTransactionsAndAudit() throws Exception {
+		String adminToken = bootstrapToken();
+		HttpResponse<String> student = createStudent(adminToken, "FIN-" + UUID.randomUUID(), null);
+		String studentId = objectMapper.readTree(student.body()).path("id").asText();
+		HttpResponse<String> invoice = issueInvoice(adminToken, studentId, List.of(
+				Map.of("description", "Tuition", "quantity", 2, "unitAmount", 1000.00),
+				Map.of("description", "Materials", "quantity", 1, "unitAmount", 500.00)));
+
+		assertEquals(201, invoice.statusCode(), invoice.body());
+		var issued = objectMapper.readTree(invoice.body());
+		String invoiceId = issued.path("id").asText();
+		assertTrue(issued.path("invoiceNumber").asText().matches("INV-\\d{4}-\\d{6}"));
+		assertTrue(new java.math.BigDecimal(issued.path("totalAmount").asText())
+				.compareTo(new java.math.BigDecimal("2500.00")) == 0);
+		assertEquals("ISSUED", issued.path("status").asText());
+		assertEquals(2, issued.path("items").size());
+
+		HttpResponse<String> firstPayment = recordPayment(adminToken, invoiceId, 1200.00);
+		assertEquals(201, firstPayment.statusCode(), firstPayment.body());
+		var payment = objectMapper.readTree(firstPayment.body());
+		assertEquals("JPY", payment.path("currency").asText());
+
+		HttpResponse<String> afterPartial = sendRequest("/api/v1/invoices/" + invoiceId, adminToken);
+		assertEquals(200, afterPartial.statusCode(), afterPartial.body());
+		assertEquals("PARTIALLY_PAID", objectMapper.readTree(afterPartial.body()).path("status").asText());
+		assertTrue(new java.math.BigDecimal(
+				objectMapper.readTree(afterPartial.body()).path("balance").asText())
+				.compareTo(new java.math.BigDecimal("1300.00")) == 0);
+
+		HttpResponse<String> overpayment = recordPayment(adminToken, invoiceId, 1300.01);
+		assertEquals(409, overpayment.statusCode(), overpayment.body());
+
+		HttpResponse<String> finalPayment = recordPayment(adminToken, invoiceId, 1300.00);
+		assertEquals(201, finalPayment.statusCode(), finalPayment.body());
+		HttpResponse<String> paidInvoice = sendRequest("/api/v1/invoices/" + invoiceId, adminToken);
+		assertEquals("PAID", objectMapper.readTree(paidInvoice.body()).path("status").asText());
+
+		assertEquals(2L, jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM payments WHERE invoice_id = ?",
+				Long.class,
+				UUID.fromString(invoiceId)));
+		assertEquals(2L, jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM financial_transactions ft JOIN payments p ON p.id = ft.payment_id WHERE p.invoice_id = ?",
+				Long.class,
+				UUID.fromString(invoiceId)));
+		assertEquals(1L, jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM financial_audit_events WHERE resource_type = 'INVOICE' AND resource_id = ?",
+				Long.class,
+				UUID.fromString(invoiceId)));
+		assertEquals(2L, jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM financial_audit_events WHERE resource_type = 'PAYMENT' AND resource_id IN "
+						+ "(SELECT id FROM payments WHERE invoice_id = ?)",
+				Long.class,
+				UUID.fromString(invoiceId)));
+		assertEquals(200, sendRequest("/api/v1/transactions?page=0&size=100", adminToken).statusCode());
+	}
+
+	@Test
+	void studentsCanOnlyReadTheirOwnInvoicesAndPayments() throws Exception {
+		String adminToken = bootstrapToken();
+		String email = UUID.randomUUID() + "@example.test";
+		String studentToken = createUserAndLogin(email, UUID.randomUUID().toString(), RoleCode.STUDENT);
+		UUID studentUserId = userAccountRepository.findByEmailIgnoreCase(email).orElseThrow().getId();
+		HttpResponse<String> ownStudent = createStudent(adminToken, "OWN-" + UUID.randomUUID(), studentUserId);
+		String ownStudentId = objectMapper.readTree(ownStudent.body()).path("id").asText();
+		String ownInvoiceId = objectMapper.readTree(
+				issueInvoice(adminToken, ownStudentId, List.of(
+						Map.of("description", "Tuition", "quantity", 1, "unitAmount", 800.00))).body())
+				.path("id").asText();
+
+		HttpResponse<String> ownList = sendRequest("/api/v1/students/me/invoices", studentToken);
+		assertEquals(200, ownList.statusCode(), ownList.body());
+		assertEquals(1, objectMapper.readTree(ownList.body()).path("content").size());
+		assertEquals(200, sendRequest(
+				"/api/v1/students/me/invoices/" + ownInvoiceId, studentToken).statusCode());
+		assertEquals(200, sendRequest("/api/v1/students/me/payments", studentToken).statusCode());
+		assertEquals(403, sendRequest("/api/v1/invoices", studentToken).statusCode());
+
+		HttpResponse<String> otherStudent = createStudent(adminToken, "OTHER-" + UUID.randomUUID(), null);
+		String otherStudentId = objectMapper.readTree(otherStudent.body()).path("id").asText();
+		String otherInvoiceId = objectMapper.readTree(
+				issueInvoice(adminToken, otherStudentId, List.of(
+						Map.of("description", "Tuition", "quantity", 1, "unitAmount", 900.00))).body())
+				.path("id").asText();
+		assertEquals(404, sendRequest(
+				"/api/v1/students/me/invoices/" + otherInvoiceId, studentToken).statusCode());
+	}
+
+	@Test
+	void invoiceCreationRejectsInvalidItemsAndNonPositiveTotals() throws Exception {
+		String adminToken = bootstrapToken();
+		HttpResponse<String> student = createStudent(adminToken, "BADINV-" + UUID.randomUUID(), null);
+		String studentId = objectMapper.readTree(student.body()).path("id").asText();
+
+		HttpResponse<String> invalidItem = issueInvoice(adminToken, studentId, List.of(
+				Map.of("description", "Invalid quantity", "quantity", 0, "unitAmount", 100.00)));
+		assertEquals(400, invalidItem.statusCode());
+
+		HttpResponse<String> zeroTotal = issueInvoice(adminToken, studentId, List.of(
+				Map.of("description", "Free item", "quantity", 1, "unitAmount", 0.00)));
+		assertEquals(400, zeroTotal.statusCode());
+	}
+
+	@Test
 	void disabledAccountCannotReusePreviouslyIssuedToken() throws Exception {
 		String email = UUID.randomUUID() + "@example.test";
 		String token = createUserAndLogin(email, UUID.randomUUID().toString(), RoleCode.STUDENT);
@@ -650,6 +759,31 @@ class SchoolManagementBackendApplicationTests {
 				Map.of("code", "ENR-" + UUID.randomUUID(), "name", "Enrollment course", "status", "ACTIVE"));
 		assertEquals(201, course.statusCode(), course.body());
 		return objectMapper.readTree(course.body()).path("id").asText();
+	}
+
+	private HttpResponse<String> issueInvoice(
+			String token,
+			String studentId,
+			List<Map<String, Object>> items) throws Exception {
+		return sendJson(
+				"/api/v1/invoices",
+				token,
+				"POST",
+				Map.of(
+						"studentId", studentId,
+						"currency", "JPY",
+						"items", items));
+	}
+
+	private HttpResponse<String> recordPayment(String token, String invoiceId, double amount) throws Exception {
+		return sendJson(
+				"/api/v1/payments",
+				token,
+				"POST",
+				Map.of(
+						"invoiceId", invoiceId,
+						"amount", amount,
+						"method", "BANK_TRANSFER"));
 	}
 
 	private String loginToken(String email, String password) throws Exception {
